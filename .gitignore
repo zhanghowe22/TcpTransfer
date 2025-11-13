@@ -1,0 +1,15 @@
+# 忽略build文件夹（包括里面所有内容）
+build/
+# 忽略Python虚拟环境
+venv/
+env/
+
+# 忽略IDE配置文件（比如VSCode）
+.vscode/
+
+# 忽略日志文件
+*.log
+
+# 忽略编译生成的文件
+*.pyc  # Python编译文件
+dist/  # 打包文件夹
