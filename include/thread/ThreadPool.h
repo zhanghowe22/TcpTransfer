@@ -12,12 +12,12 @@
 class ThreadPool
 {
   public:
-    explicit ThreadPool(size_t thread_num) : m_stop(false), is_stopped(false)
+    explicit ThreadPool(size_t thread_num, size_t max_queue_size = 1000)
+        : m_stop(false), is_stopped(false), m_max_queue_size(max_queue_size)
     {
         // 检查线程数是否合法（至少1个线程）
-        if (thread_num == 0) {
-            throw std::invalid_argument("线程池线程数不能为0");
-        }
+        if (thread_num == 0) throw std::invalid_argument("线程池线程数不能为0");
+        if (max_queue_size == 0) throw std::invalid_argument("队列容量不能为0");
         // 创建num_threads个工作线程，每个线程执行worker_loop
         for (size_t i = 0; i < thread_num; ++i) {
             workers.emplace_back([this]() {
@@ -46,7 +46,10 @@ class ThreadPool
         );
 
         // 加锁保护任务队列，确保线程安全
-        std::lock_guard<std::mutex> lock(mtx);
+        std::unique_lock<std::mutex> lock(mtx);
+
+        // 队列满时，阻塞等待（直到队列不满或线程池停止）
+        cv_queue_not_full.wait(lock, [this]() { return this->m_stop || this->tasks.size() < this->m_max_queue_size; });
 
         // 检查线程池是否已停止，停止则拒绝新任务
         if (m_stop) {
@@ -67,7 +70,7 @@ class ThreadPool
         if (is_stopped) { // 已经停止过，直接返回
             return;
         }
-        m_stop = true;   // 标记“开始停止，拒绝新任务”
+        m_stop = true; // 标记“开始停止，拒绝新任务”
         lock.unlock(); // 提前解锁：避免唤醒后线程拿不到锁，导致死锁
 
         // 2. 唤醒所有阻塞的工作线程
@@ -112,6 +115,9 @@ class ThreadPool
             // 5. 执行任务（捕获异常，避免单个任务崩溃导致线程退出）
             try {
                 task();
+                lock.lock();                    // 重新加锁，通知队列不满
+                cv_queue_not_full.notify_one(); // 有任务被执行，队列空出一个位置
+                lock.unlock();
             } catch (const std::exception& e) {
                 // 任务执行异常，打印日志（实际项目中可替换为日志系统）
                 fprintf(stderr, "线程池任务执行异常：%s\n", e.what());
@@ -122,10 +128,12 @@ class ThreadPool
     }
 
   private:
-    std::vector<std::thread>          workers;    // 工作线程数组
-    std::queue<std::function<void()>> tasks;      // 任务队列（存储待执行的函数）
-    std::mutex                        mtx;        // 保护任务队列的互斥锁
-    std::condition_variable           cv;         // 条件变量（通知线程任务到来）
-    bool                              m_stop;       // 停止标志：true=触发停止（不再接受新任务）
-    bool                              is_stopped; // 完全停止标志：true=所有线程已回收、任务已处理完
+    std::vector<std::thread>          workers;           // 工作线程数组
+    std::queue<std::function<void()>> tasks;             // 任务队列（存储待执行的函数）
+    std::mutex                        mtx;               // 保护任务队列的互斥锁
+    std::condition_variable           cv;                // 条件变量（通知线程任务到来）
+    bool                              m_stop;            // 停止标志：true=触发停止（不再接受新任务）
+    bool                              is_stopped;        // 完全停止标志：true=所有线程已回收、任务已处理完
+    std::condition_variable           cv_queue_not_full; // 队列不满的条件变量
+    size_t                            m_max_queue_size;  // 队列最大容量
 };
