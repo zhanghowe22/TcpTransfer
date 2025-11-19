@@ -1,4 +1,11 @@
 #pragma once
+#ifdef _WIN32
+#include <winsock2.h>          // Windows 下的 socket 头文件（包含 htonl/ntohl）
+#pragma comment(lib, "ws2_32.lib")  // 链接 Winsock 库（Windows 必需）
+#else
+#include <arpa/inet.h>         // Linux 下的字节序转换头文件（包含 htonl/ntohl）
+#include <netinet/in.h>        // 辅助包含，确保函数声明完整
+#endif
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -27,5 +34,5 @@ class TransferProtocol {
     static bool unpack_upload_finish(const std::vector<char>& buf, std::string& md5);
 
     // 5. 打包服务器响应：[0x04][1字节状态（0=成功，1=失败）]
-    static std::vector<char> pack_upload_ack(bool success);
+    static std::vector<char> pack_upload_ack(bool success, const std::string& msg = "");
 };

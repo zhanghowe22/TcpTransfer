@@ -124,10 +124,25 @@ bool upload_file(TCPClient& client, const std::string& local_filename) {
     std::vector<char> ack_vec(ack_buf, ack_buf + recv_len);
     if (ack_vec.size() >= 2 && static_cast<CommandType>(ack_vec[0]) == CommandType::UPLOAD_ACK) {
         bool success = (ack_vec[1] == 0x00);
+        std::string msg     = "未知信息"; // 默认消息
+        // 解析“消息长度+消息内容”（仅当数据足够时）
+        if (ack_vec.size() >= 2 + 4) { // 前2字节（命令+标志）+ 4字节（消息长度）
+            size_t offset = 2;
+            // 解析消息长度（网络字节序→主机字节序）
+            uint32_t msg_len_net = *reinterpret_cast<const uint32_t*>(ack_vec.data() + offset);
+            uint32_t msg_len     = ntohl(msg_len_net);
+            offset += 4;
+
+            // 解析消息内容
+            if (msg_len > 0 && offset + msg_len <= ack_vec.size()) {
+                msg.assign(ack_vec.begin() + offset, ack_vec.begin() + offset + msg_len);
+            }
+        }
+            // 输出结果（带消息）
         if (success) {
-            std::cout << "=== 上传成功！服务器校验MD5一致 ===" << std::endl;
+            std::cout << "=== 上传成功！===" << std::endl << "服务器消息：" << msg << std::endl;
         } else {
-            std::cout << "=== 上传失败！服务器校验MD5不一致 ===" << std::endl;
+            std::cerr << "=== 上传失败！===" << std::endl << "失败原因：" << msg << std::endl;
         }
         file.close();
         return success;
@@ -168,6 +183,6 @@ int main(int argc, char* argv[])
     bool upload_success = upload_file(client, local_filename);
 
     // 上传完成后断开连接
-    client.disconnect();
+    // client.disconnect();
     return upload_success ? 0 : 1;
 }
