@@ -98,3 +98,244 @@ std::vector<char> TransferProtocol::pack_upload_ack(bool success, const std::str
 
     return buf;
 }
+
+// 打包“分块上传初始化请求”
+std::vector<char>
+TransferProtocol::pack_block_upload_request(const std::string& filename, uint64_t file_size, uint32_t block_size)
+{
+    std::vector<char> data;
+    // 1. 命令类型
+    data.push_back(static_cast<char>(CommandType::BLOCK_UPLOAD_REQUEST));
+    // 2. 文件名长度（网络字节序）
+    uint32_t filename_len = htonl(static_cast<uint32_t>(filename.size()));
+    data.insert(data.end(), (char*)&filename_len, (char*)&filename_len + 4);
+    // 3. 文件名
+    data.insert(data.end(), filename.begin(), filename.end());
+    // 4. 文件总大小（8字节，直接存储）
+    data.insert(data.end(), (char*)&file_size, (char*)&file_size + 8);
+    // 5. 块大小（网络字节序）
+    uint32_t block_size_net = htonl(block_size);
+    data.insert(data.end(), (char*)&block_size_net, (char*)&block_size_net + 4);
+    return data;
+}
+
+// 打包“块查询请求”
+std::vector<char> TransferProtocol::pack_block_query(const std::string& file_id)
+{
+    std::vector<char> data;
+    // 1. 命令类型
+    data.push_back(static_cast<char>(CommandType::BLOCK_QUERY));
+    // 2. file_id长度（网络字节序）
+    uint32_t id_len = htonl(static_cast<uint32_t>(file_id.size()));
+    data.insert(data.end(), (char*)&id_len, (char*)&id_len + 4);
+    // 3. file_id
+    data.insert(data.end(), file_id.begin(), file_id.end());
+    return data;
+}
+
+// 打包“块数据”
+std::vector<char>
+TransferProtocol::pack_block_data(const std::string& file_id, uint32_t block_idx, const std::vector<char>& block_data)
+{
+    std::vector<char> data;
+    // 1. 命令类型
+    data.push_back(static_cast<char>(CommandType::BLOCK_DATA));
+    // 2. file_id
+    data.insert(data.end(), file_id.begin(), file_id.end());
+    // 3. 块序号（网络字节序）
+    uint32_t block_idx_net = htonl(block_idx);
+    data.insert(data.end(), (char*)&block_idx_net, (char*)&block_idx_net + 4);
+    // 4. 块数据长度（网络字节序）
+    uint32_t data_len = htonl(static_cast<uint32_t>(block_data.size()));
+    data.insert(data.end(), (char*)&data_len, (char*)&data_len + 4);
+    // 5. 块数据
+    data.insert(data.end(), block_data.begin(), block_data.end());
+    return data;
+}
+
+// 打包“分块上传完成通知”
+std::vector<char> TransferProtocol::pack_block_finish(const std::string& file_id, uint32_t total_blocks)
+{
+    std::vector<char> data;
+    // 1. 命令类型
+    data.push_back(static_cast<char>(CommandType::BLOCK_FINISH));
+    // 2. file_id
+    data.insert(data.end(), file_id.begin(), file_id.end());
+    // 3. 总块数（网络字节序）
+    uint32_t total_blocks_net = htonl(total_blocks);
+    data.insert(data.end(), (char*)&total_blocks_net, (char*)&total_blocks_net + 4);
+    return data;
+}
+
+// 解包“分块上传初始化响应”（提取file_id）
+bool TransferProtocol::unpack_block_upload_ack(const std::vector<char>& data, std::string& file_id)
+{
+    if (data.size() < 6) return false; // 1(命令)+1(成功标志)+4(长度)
+    // 校验命令类型
+    if (static_cast<CommandType>(data[0]) != CommandType::UPLOAD_ACK) return false;
+    // 校验成功标志
+    if (data[1] != 0x00) return false; // 0x00表示成功
+    // 解析file_id长度
+    uint32_t id_len = ntohl(*(uint32_t*)(data.data() + 2));
+    // 解析file_id内容
+    if (data.size() < 6 + id_len) return false;
+    file_id = std::string(data.begin() + 6, data.begin() + 6 + id_len);
+    return true;
+}
+
+// 解包“块查询响应”（提取缺失块序号）
+bool TransferProtocol::unpack_block_query_ack(const std::vector<char>& data, std::vector<uint32_t>& missing_blocks)
+{
+    if (data.size() < 6) return false; // 1(命令)+1(成功标志)+4(数量)
+    // 校验命令类型
+    if (static_cast<CommandType>(data[0]) != CommandType::UPLOAD_ACK) return false;
+    // 校验成功标志
+    if (data[1] != 0x00) return false;
+    // 解析块数量
+    uint32_t block_count = ntohl(*(uint32_t*)(data.data() + 2));
+    // 校验总长度
+    if (data.size() < 6 + block_count * 4) return false;
+    // 解析每个块序号
+    missing_blocks.clear();
+    for (uint32_t i = 0; i < block_count; ++i) {
+        uint32_t block_idx = ntohl(*(uint32_t*)(data.data() + 6 + i * 4));
+        missing_blocks.push_back(block_idx);
+    }
+    return true;
+}
+
+// 解包“块数据响应”（判断是否成功）
+bool TransferProtocol::unpack_block_data_ack(const std::vector<char>& data, bool& success)
+{
+    if (data.size() < 2) return false; // 1(命令)+1(成功标志)
+    if (static_cast<CommandType>(data[0]) != CommandType::UPLOAD_ACK) return false;
+    success = (data[1] == 0x00); // 0x00成功，其他失败
+    return true;
+}
+
+// 解包“分块上传完成响应”（提取结果和MD5）
+bool TransferProtocol::unpack_block_finish_ack(const std::vector<char>& data,
+                                               bool&                    success,
+                                               std::string&             msg,
+                                               std::string&             md5)
+{
+    if (data.size() < 6) return false; // 1(命令)+1(成功标志)+4(消息长度)
+    if (static_cast<CommandType>(data[0]) != CommandType::UPLOAD_ACK) return false;
+    // 解析成功标志
+    success = (data[1] == 0x00);
+    // 解析消息长度
+    uint32_t msg_len = ntohl(*(uint32_t*)(data.data() + 2));
+    if (data.size() < 6 + msg_len) return false;
+    // 解析消息内容
+    msg = std::string(data.begin() + 6, data.begin() + 6 + msg_len);
+    // 提取MD5（假设消息格式为"上传成功，MD5=xxx"）
+    size_t md5_pos = msg.find("MD5=");
+    if (md5_pos != std::string::npos) {
+        md5 = msg.substr(md5_pos + 4);
+    }
+    return true;
+}
+
+bool TransferProtocol::unpack_block_upload_request(const std::vector<char>& data,
+                                                   std::string&             filename,
+                                                   uint64_t&                total_size,
+                                                   uint32_t&                block_size)
+{
+    if (data.size() < 4 + 8 + 4) return false;
+    size_t offset = 0;
+    // 文件名长度
+    uint32_t filename_len = ntohl(*(uint32_t*)(data.data() + offset));
+    offset += 4;
+    // 文件名
+    if (data.size() < offset + filename_len) return false;
+    filename = std::string(data.begin() + offset, data.begin() + offset + filename_len);
+    offset += filename_len;
+    // 文件总大小
+    total_size = *(uint64_t*)(data.data() + offset);
+    offset += 8;
+    // 块大小
+    block_size = ntohl(*(uint32_t*)(data.data() + offset));
+    return true;
+}
+
+bool TransferProtocol::unpack_block_query(const std::vector<char>& data, std::string& file_id)
+{
+    if (data.size() < 4) return false;
+    uint32_t id_len = ntohl(*(uint32_t*)(data.data()));
+    if (data.size() < 4 + id_len) return false;
+    file_id = std::string(data.begin() + 4, data.begin() + 4 + id_len);
+    return true;
+}
+
+bool TransferProtocol::unpack_block_data(const std::vector<char>& data,
+                                         std::string&             file_id,
+                                         uint32_t&                block_idx,
+                                         std::vector<char>&       block_data)
+{
+    size_t offset = 0;
+    // file_id长度（隐含在data中，按客户端打包逻辑，file_id后接块序号）
+    uint32_t id_len = ntohl(*(uint32_t*)(data.data() + offset));
+    offset += 4;
+    if (data.size() < offset + id_len + 4 + 4) return false;
+    // file_id
+    file_id = std::string(data.begin() + offset, data.begin() + offset + id_len);
+    offset += id_len;
+    // 块序号
+    block_idx = ntohl(*(uint32_t*)(data.data() + offset));
+    offset += 4;
+    // 块数据长度
+    uint32_t data_len = ntohl(*(uint32_t*)(data.data() + offset));
+    offset += 4;
+    // 块数据
+    if (data.size() < offset + data_len) return false;
+    block_data.assign(data.begin() + offset, data.begin() + offset + data_len);
+    return true;
+}
+
+bool TransferProtocol::unpack_block_finish(const std::vector<char>& data, std::string& file_id, uint32_t& total_blocks)
+{
+    size_t   offset = 0;
+    uint32_t id_len = ntohl(*(uint32_t*)(data.data() + offset));
+    offset += 4;
+    if (data.size() < offset + id_len + 4) return false;
+    file_id = std::string(data.begin() + offset, data.begin() + offset + id_len);
+    offset += id_len;
+    total_blocks = ntohl(*(uint32_t*)(data.data() + offset));
+    return true;
+}
+
+std::vector<char> TransferProtocol::pack_block_upload_ack(bool success, const std::string& file_id)
+{
+    std::vector<char> data;
+    data.push_back(static_cast<char>(CommandType::UPLOAD_ACK));
+    data.push_back(success ? 0x00 : 0x01);
+    uint32_t id_len = htonl(static_cast<uint32_t>(file_id.size()));
+    data.insert(data.end(), (char*)&id_len, (char*)&id_len + 4);
+    data.insert(data.end(), file_id.begin(), file_id.end());
+    return data;
+}
+
+std::vector<char> TransferProtocol::pack_block_query_ack(bool success, const std::vector<uint32_t>& missing_blocks)
+{
+    std::vector<char> data;
+    data.push_back(static_cast<char>(CommandType::UPLOAD_ACK));
+    data.push_back(success ? 0x00 : 0x01);
+    uint32_t count = htonl(static_cast<uint32_t>(missing_blocks.size()));
+    data.insert(data.end(), (char*)&count, (char*)&count + 4);
+    for (uint32_t idx : missing_blocks) {
+        uint32_t idx_net = htonl(idx);
+        data.insert(data.end(), (char*)&idx_net, (char*)&idx_net + 4);
+    }
+    return data;
+}
+
+std::vector<char> TransferProtocol::pack_block_data_ack(bool success, const std::string& msg)
+{
+    return pack_upload_ack(success, msg);
+}
+
+std::vector<char> TransferProtocol::pack_block_finish_ack(bool success, const std::string& msg, const std::string& md5)
+{
+    std::string full_msg = msg + "，MD5=" + md5;
+    return pack_upload_ack(success, full_msg);
+}
